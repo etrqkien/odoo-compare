@@ -79,24 +79,17 @@ class DeliveryCarrier(models.Model):
         }
 
     def available_carriers(self, partner):
-        print('vao availbale')
         return self.filtered(lambda c: c._match_address(partner))
 
     def _match_address(self, partner):
         self.ensure_one()
         if self.country_ids and partner.country_id not in self.country_ids:
-            print('vao 1')
             return False
         if self.state_ids and partner.state_id not in self.state_ids:
-            print(partner.state_id)
-            print(self.state_ids)
-            print('vao 2')
             return False
         if self.zip_from and (partner.zip or '').upper() < self.zip_from.upper():
-            print('vao 3')
             return False
         if self.zip_to and (partner.zip or '').upper() > self.zip_to.upper():
-            print('vao 4')
             return False
         return True
 

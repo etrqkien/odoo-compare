@@ -8,7 +8,7 @@ import time
 from itertools import groupby
 from odoo import api, fields, models, _
 from odoo.tools import DEFAULT_SERVER_DATETIME_FORMAT
-from odoo.tools.float_utils import float_compare, float_round
+from odoo.tools.float_utils import float_compare, float_is_zero, float_round
 from odoo.exceptions import UserError
 from odoo.addons.stock.models.stock_move import PROCUREMENT_PRIORITIES
 from operator import itemgetter
@@ -405,10 +405,12 @@ class Picking(models.Model):
         """
         for picking in self:
             packages = self.env['stock.quant.package']
-            for ml in picking.move_line_ids:
-                if ml.package_id.id == ml.result_package_id.id:
-                    if picking._check_move_lines_map_quant_package(ml.package_id):
-                        packages |= ml.package_id
+            packages_to_check = picking.move_line_ids\
+                .filtered(lambda ml: ml.result_package_id and ml.package_id.id == ml.result_package_id.id)\
+                .mapped('package_id')
+            for package_to_check in packages_to_check:
+                if picking.state in ('done', 'cancel') or picking._check_move_lines_map_quant_package(package_to_check):
+                    packages |= package_to_check
             picking.entire_package_ids = packages
             picking.entire_package_detail_ids = packages
 
@@ -441,7 +443,7 @@ class Picking(models.Model):
         for picking in self:
             if self._context.get('planned_picking') and picking.state == 'draft':
                 picking.show_validate = False
-            elif picking.state not in ('draft', 'confirmed', 'assigned') or not picking.is_locked:
+            elif picking.state not in ('draft', 'waiting', 'confirmed', 'assigned') or not picking.is_locked:
                 picking.show_validate = False
             else:
                 picking.show_validate = True
@@ -542,7 +544,19 @@ class Picking(models.Model):
         # call `_action_assign` on every confirmed move which location_id bypasses the reservation
         self.filtered(lambda picking: picking.location_id.usage in ('supplier', 'inventory', 'production') and picking.state == 'confirmed')\
             .mapped('move_lines')._action_assign()
-        return True
+        if self.env.context.get('planned_picking') and len(self) == 1:
+            action = self.env.ref('stock.action_picking_form')
+            result = action.read()[0]
+            result['res_id'] = self.id
+            result['context'] = {
+                'search_default_picking_type_id': [self.picking_type_id.id],
+                'default_picking_type_id': self.picking_type_id.id,
+                'contact_display': 'partner_address',
+                'planned_picking': False,
+            }
+            return result
+        else:
+            return True
 
     @api.multi
     def action_assign(self):
@@ -580,8 +594,7 @@ class Picking(models.Model):
         @return: True
         """
         # TDE FIXME: remove decorator when migration the remaining
-        # TDE FIXME: draft -> automatically done, if waiting ?? CLEAR ME
-        todo_moves = self.mapped('move_lines').filtered(lambda self: self.state in ['draft', 'partially_available', 'assigned', 'confirmed'])
+        todo_moves = self.mapped('move_lines').filtered(lambda self: self.state in ['draft', 'waiting', 'partially_available', 'assigned', 'confirmed'])
         # Check if there are ops not linked to moves yet
         for pick in self:
             # # Explode manually added packages
@@ -623,7 +636,12 @@ class Picking(models.Model):
         self.write({'date_done': fields.Datetime.now()})
         return True
 
-    do_transfer = action_done #TODO:replace later
+    # Backward compatibility
+    # Problem with fixed reference to a function:
+    # it doesn't allow for overriding action_done() through do_transfer
+    # get rid of me in master (and make me private ?)
+    def do_transfer(self):
+        return self.action_done()
 
     def _check_move_lines_map_quant_package(self, package):
         """ This method checks that all product of the package (quant) are well present in the move_line_ids of the picking. """
@@ -654,10 +672,8 @@ class Picking(models.Model):
 
     @api.multi
     def do_unreserve(self):
-        for move in self:
-            for move_line in move.move_lines:
-                move_line._do_unreserve()
-        self.write({'state': 'confirmed'})
+        for picking in self:
+            picking.move_lines._do_unreserve()
 
     @api.multi
     def button_validate(self):
@@ -667,10 +683,10 @@ class Picking(models.Model):
 
         # If no lots when needed, raise error
         picking_type = self.picking_type_id
-        no_quantities_done = all(line.qty_done == 0.0 for line in self.move_line_ids)
-        no_initial_demand = all(move.product_uom_qty == 0.0 for move in self.move_lines)
-        if no_initial_demand and no_quantities_done:
-            raise UserError(_('You cannot validate a transfer if you have not processed any quantity.'))
+        no_quantities_done = all(float_is_zero(move_line.qty_done, precision_rounding=move_line.product_uom_id.rounding) for move_line in self.move_line_ids)
+        no_reserved_quantities = all(float_is_zero(move_line.product_qty, precision_rounding=move_line.product_uom_id.rounding) for move_line in self.move_line_ids)
+        if no_reserved_quantities and no_quantities_done:
+            raise UserError(_('You cannot validate a transfer if you have not processed any quantity. You should rather cancel the transfer.'))
 
         if picking_type.use_create_lots or picking_type.use_existing_lots:
             lines_to_check = self.move_line_ids
@@ -815,7 +831,7 @@ class Picking(models.Model):
 
     def _put_in_pack(self):
         package = False
-        for pick in self:
+        for pick in self.filtered(lambda p: p.state not in ('done', 'cancel')):
             operations = pick.move_line_ids.filtered(lambda o: o.qty_done > 0 and not o.result_package_id)
             operation_ids = self.env['stock.move.line']
             if operations:

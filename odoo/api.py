@@ -1004,11 +1004,25 @@ class Cache(object):
 
     def get_records(self, model, field):
         """ Return the records of ``model`` that have a value for ``field``. """
-        browse = model.browse
-        ids = [record_id
-               for record_id, field_record_cache in self._data[field].items()
-               if field.cache_key(browse(record_id)) in field_record_cache]
-        return browse(ids)
+        key = field.cache_key(model)
+        # optimization: do not field.cache_key(record) for each record in cache
+        ids = [
+            record_id
+            for record_id, field_record_cache in self._data[field].items()
+            if key in field_record_cache
+        ]
+        return model.browse(ids)
+
+    def copy(self, records, env):
+        """ Copy the cache of ``records`` to ``env``. """
+        src = records
+        dst = records.with_env(env)
+        for field, field_cache in self._data.items():
+            src_key = field.cache_key(src)
+            dst_key = field.cache_key(dst)
+            for record_id, record_cache in field_cache.items():
+                if src_key in record_cache:
+                    record_cache[dst_key] = record_cache[src_key]
 
     def invalidate(self, spec=None):
         """ Invalidate the cache, partially or totally depending on ``spec``. """

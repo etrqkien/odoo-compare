@@ -71,7 +71,7 @@ def keep_query(*keep_params, **additional_params):
     if not keep_params and not additional_params:
         keep_params = ('*',)
     params = additional_params.copy()
-    qs_keys = list(request.httprequest.args)
+    qs_keys = list(request.httprequest.args) if request else []
     for keep_param in keep_params:
         for param in fnmatch.filter(qs_keys, keep_param):
             if param not in additional_params and param in qs_keys:
@@ -247,7 +247,7 @@ actual arch.
                 if fullpath:
                     arch_fs = get_view_arch_from_file(fullpath, view.xml_id)
                     # replace %(xml_id)s, %(xml_id)d, %%(xml_id)s, %%(xml_id)d by the res_id
-                    arch_fs = arch_fs and resolve_external_ids(arch_fs, view.xml_id)
+                    arch_fs = arch_fs and resolve_external_ids(arch_fs, view.xml_id).replace('%%', '%')
                 else:
                     _logger.warning("View %s: Full path [%s] cannot be found.", view.xml_id, view.arch_fs)
                     arch_fs = False
